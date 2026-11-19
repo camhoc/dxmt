@@ -1716,6 +1716,7 @@ private:
   // Bound textures: 0..15 PS, 16..19 VS samplers. D3DDMAPSAMPLER (256)
   // silently ignored. Stored as private refs; SetTexture doesn't cycle
   // public refcount. Slot type is common base for 2D/Cube/Volume.
+  void d9LogDraw(uint32_t n, D3DPRIMITIVETYPE prim, UINT primCount);
   Com<class MTLD3D9CommonTexture, false> m_textures[D3D9_MAX_TEXTURE_UNITS];
   // Sampler state: wined3d's shape (combined PS+VS samplers, indexed
   // by D3DSAMPLERSTATETYPE 1..D3DSAMP_DMAPOFFSET). Slot 0 is unused

@@ -2904,6 +2904,33 @@ static bool d9TexTraceEnabled() {
 }
 
 
+
+// MADEIRA diagnostic (off by default): DXMT_D9_DRAW_TRACE=<N> logs 300
+// DrawIndexedPrimitive calls starting at draw number N ("[d9-draw-trace]"; "1"
+// means N=3000, past the loading screens): vertex/pixel shader id (dword count
+// + FNV hash of the bytecode), colour target 0 and depth sizes/formats, and for
+// every bound texture its D3D resource type (3=2D 4=volume 5=cube), D3D format
+// and Metal pixel format. Shows which shaders and textures the world draws use.
+static uint32_t d9DrawTraceStart() {
+  static const uint32_t v = [] {
+    const char *e = std::getenv("DXMT_D9_DRAW_TRACE");
+    if (!e || !e[0] || e[0] == '0')
+      return 0u;
+    uint32_t n = static_cast<uint32_t>(std::strtoul(e, nullptr, 10));
+    return n <= 1 ? 3000u : n;
+  }();
+  return v;
+}
+
+static uint32_t d9Fnv(const DWORD *code, size_t bytes) {
+  uint32_t h = 2166136261u;
+  for (size_t i = 0; code && i < bytes / 4; i++) {
+    h ^= code[i];
+    h *= 16777619u;
+  }
+  return h;
+}
+
 // Device-level GetBackBuffer is a thin forwarder to the chain identified
 // by iSwapChain (we only have one). wined3d device.c same shape.
 HRESULT STDMETHODCALLTYPE
@@ -7504,6 +7531,34 @@ MTLD3D9Device::DrawPrimitive(D3DPRIMITIVETYPE PrimitiveType, UINT StartVertex, U
   return D3D_OK;
 }
 
+void MTLD3D9Device::d9LogDraw(uint32_t n, D3DPRIMITIVETYPE prim, UINT primCount) {
+  std::string line = str::format(
+      "[d9-draw-trace] #", n, " prim=", static_cast<uint32_t>(prim), " count=", primCount);
+  if (auto *vs = m_vertexShader.ptr())
+    line += str::format(" vs=", vs->bytecodeByteLength() / 4, "/0x", std::hex, d9Fnv(vs->bytecode(), vs->bytecodeByteLength()), std::dec);
+  else
+    line += " vs=fixed";
+  if (auto *ps = m_pixelShader.ptr())
+    line += str::format(" ps=", ps->bytecodeByteLength() / 4, "/0x", std::hex, d9Fnv(ps->bytecode(), ps->bytecodeByteLength()), std::dec);
+  else
+    line += " ps=fixed";
+  if (auto *rt = m_renderTargets[0].ptr())
+    line += str::format(" rt0=", rt->desc().Width, "x", rt->desc().Height, "/fmt0x", std::hex, static_cast<uint32_t>(rt->desc().Format), std::dec);
+  if (auto *ds = m_depthStencilSurface.ptr())
+    line += str::format(" ds=", ds->desc().Width, "x", ds->desc().Height);
+  else
+    line += " ds=none";
+  for (uint32_t i = 0; i < D3D9_MAX_TEXTURE_UNITS; i++) {
+    auto *t = m_textures[i].ptr();
+    if (!t)
+      continue;
+    line += str::format(
+        " t", i, "=type", static_cast<uint32_t>(t->commonTextureType()), "/fmt0x", std::hex,
+        static_cast<uint32_t>(t->d3dFormat()), std::dec, "/mtl", static_cast<uint32_t>(t->metalPixelFormat()));
+  }
+  Logger::warn(line);
+}
+
 // DrawIndexedPrimitive: same as DrawPrimitive + bound IB + BaseVertexIndex.
 // Metal resolves indices + adds baseVertex; manual-fetch lowering consumes value as-is.
 HRESULT STDMETHODCALLTYPE
@@ -7531,6 +7586,12 @@ MTLD3D9Device::DrawIndexedPrimitive(
   // Software-VP-only shader bound in hardware VP: reject the first draw.
   if (swvpDrawGateRejects())
     return D3DERR_INVALIDCALL;
+  if (uint32_t trace_start = d9DrawTraceStart()) {
+    static std::atomic<uint32_t> draws{0};
+    uint32_t n = draws.fetch_add(1);
+    if (n >= trace_start && n < trace_start + 300)
+      d9LogDraw(n, PrimitiveType, PrimitiveCount);
+  }
   // No autorelease pool; see DrawPrimitive for the rationale.
   // Fan emulation against a bound IB; read the source indices through
   // the host pointer at (currentOffset() + StartIndex * indexSize) and

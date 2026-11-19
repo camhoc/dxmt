@@ -1,5 +1,6 @@
 #include "d3d9_device.hpp"
 #include "d3d9_guest_alloc.hpp"
+#include <cstdlib>
 #include <mutex>
 #include <unordered_map>
 #include "d3d9_madeira_window.hpp"
@@ -2890,6 +2891,19 @@ MTLD3D9Device::Present(
   return hr;
 }
 
+// MADEIRA diagnostic (off by default): DXMT_D9_TEX_TRACE=1 logs the first
+// 300 texture creates and 600 distinct texture binds ("[d9-tex-trace]"), with
+// the D3D9 format and the Metal pixel format it maps to, so a log shows
+// whether compressed (DXT) or unusual formats reach the sampler.
+static bool d9TexTraceEnabled() {
+  static const bool v = [] {
+    const char *e = std::getenv("DXMT_D9_TEX_TRACE");
+    return e && e[0] && e[0] != '0';
+  }();
+  return v;
+}
+
+
 // Device-level GetBackBuffer is a thin forwarder to the chain identified
 // by iSwapChain (we only have one). wined3d device.c same shape.
 HRESULT STDMETHODCALLTYPE
@@ -2975,6 +2989,16 @@ MTLD3D9Device::CreateTexture(
   if (!ppTexture)
     return D3DERR_INVALIDCALL;
   *ppTexture = nullptr;
+  if (d9TexTraceEnabled()) {
+    static std::atomic<uint32_t> created{0};
+    if (created.fetch_add(1) < 300)
+      Logger::warn(str::format(
+          "[d9-tex-trace] create ", Width, "x", Height, " levels=", Levels, " d3dfmt=0x", std::hex,
+          static_cast<uint32_t>(Format), std::dec, " pool=", static_cast<uint32_t>(Pool),
+          " usage=0x", std::hex, static_cast<uint32_t>(Usage), std::dec,
+          " compressed=", IsCompressedFormat(Format) ? 1 : 0
+      ));
+  }
   // Pure pool/usage/dims/levels/depth-placement rejection matrix, shared with
   // CreateCubeTexture / CreateVolumeTexture. Carries the
   // depth-format-outside-DEFAULT reject. The format-lowering rejects (unsupported format, RT capability) and
@@ -7097,6 +7121,14 @@ MTLD3D9Device::SetTexture(DWORD Stage, IDirect3DBaseTexture9 *pTexture) {
   if (m_textures[slot].ptr() == common)
     return D3D_OK;
   m_textures[slot] = common;
+  if (common && d9TexTraceEnabled()) {
+    static std::atomic<uint32_t> binds{0};
+    if (binds.fetch_add(1) < 600)
+      Logger::warn(str::format(
+          "[d9-tex-trace] bind slot=", slot, " d3dfmt=0x", std::hex, static_cast<uint32_t>(common->d3dFormat()),
+          " metalfmt=", std::dec, static_cast<uint32_t>(common->metalPixelFormat())
+      ));
+  }
   // Binding a texture whose mip chain is already dirty (dirtied while unbound)
   // must move the sweep epoch: the mark itself bumped it earlier, but that
   // draw already swept and advanced past it, so without this the next draw
